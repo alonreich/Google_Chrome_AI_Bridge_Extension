@@ -2,7 +2,7 @@
 GOOGLE CHROME BRIDGE — PROJECT STRUCTURE & OPERATIONS MANUAL
 ================================================================================
 Path:    C:\Full_Control\Google_Chrome_AI_Bridge_Extension\
-Version: Extension manifest 1.5.1 | Bridge server (Node, no npm deps)
+Version: Extension manifest 1.5.5 | Bridge server (Node, no npm deps)
 Updated: 2026-05-29
 
 This document is the single source of truth for any AI agent or human working
@@ -136,7 +136,8 @@ C:\Full_Control\Google_Chrome_AI_Bridge_Extension\
 ├── manifest.json          MV3 manifest (v1.5.1). NO "offscreen" permission
 │                          (invalid permission breaks service worker).
 ├── background.js          Service worker: poll, commands, live state, icons
-├── content.js             Injected on all http(s) pages: eye overlay + heartbeat
+├── eyes-page.js           Page-only eye overlay (no chrome.*); injected by background
+├── content.js             Legacy cleanup stub only — NOT in manifest (v1.5.5+)
 ├── popup.html / popup.js  Toolbar popup: bridge toggle, server status
 ├── offscreen.html/js      Hidden document: 4s keepalive ticks → background
 ├── icons/                 Toolbar icons (grey / blue / red states)
@@ -161,7 +162,7 @@ KEEPALIVE (why idle pages used to “die” — fixed in v1.5+)
   • Long-poll holds service worker awake up to 25s per request.
   • offscreen.js setInterval 4s → bridge_tick → pushLiveState + poll if idle.
   • chrome.alarms every 20s backup wake (if alarms API available).
-  • content.js heartbeat every 20s on each top-level page.
+  • eyes-page.js is injected on demand; no chrome.runtime in the page at all.
 
 VISUAL STATES (toolbar + bottom-right elliptical eye on page)
   Grey  — bridge OFF
@@ -172,6 +173,13 @@ SERVICE WORKER REGISTRATION
   Status code 15 = script error on load. Common fix: remove invalid manifest
   permissions; guard chrome.alarms / chrome.tabs.onDiscarded listeners.
   After fix: chrome://extensions → Clear all errors → Reload.
+
+EXTENSION RELOAD / "Extension context invalidated"
+  Caused by OLD content.js (manifest auto-inject + chrome.runtime heartbeat) surviving
+  extension reload. v1.5.5: NO content_scripts in manifest; eyes-page.js has zero
+  chrome APIs; background applyEyesToTab() uses executeScript only.
+  onInstalled runs cleanupLegacyBridgeOnTab + eyes inject on all http tabs.
+  One-time fix: Reload extension at chrome://extensions, then F5 each open tab.
 
 ================================================================================
 §6  HTTP API REFERENCE (AGENT)
@@ -226,6 +234,18 @@ execute
   { "action": "execute", "code": "...", "id": "ex1", "tabId": optional }
   Runs JS in page context. Special prefix:
     click_text:Submit   → clicks first button/link containing that text (case-insensitive)
+  Note: arbitrary code uses eval() — blocked on web.telegram.org CSP. Prefer telegram_probe.
+
+telegram_probe
+  { "action": "telegram_probe", "id": "tg1", "tabId": optional }
+  CSP-safe DOM probe for Service-Now PD Telegram automation (login, BotFather, bot list,
+  token menu, bot @buttons). Mirrors telegram_helper.js getLoginStatus / stage hints.
+
+telegram_botfather_chat / telegram_botfather_start / telegram_open_botfather / telegram_dom_scan  (v1.5.12+)
+  Injected module: telegram-botfather.js (sidebar → focus search → type in contenteditable →
+  Start / search hit → hash). telegram_dom_scan returns searchInputs + botFatherHits for learning.
+  Scripts: Service-Now_PD/scripts/bridge-learn-botfather.ps1, bridge-step2-botfather-chat.ps1
+  RELOAD extension on chrome://extensions after pulling Bridge changes.
 
 list_tabs
   { "action": "list_tabs", "id": "tabs1" }

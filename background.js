@@ -123,6 +123,23 @@ async function closeOffscreenDocument() {
     } catch (e) {}
 }
 
+async function reinjectAllBridgeTabs() {
+    const tabs = await chrome.tabs.query({});
+    const controlled = controlActiveNow();
+    for (const tab of tabs) {
+        if (!tab.id || !tab.url?.startsWith('http')) continue;
+        try {
+            await applyEyesToTab(tab.id, {
+                active: bridgeActive,
+                isBusy: controlled,
+                eyeMode: !bridgeActive ? 'off' : controlled ? 'busy' : 'idle'
+            });
+        } catch (e) {
+            await extLog('Reinject tab ' + tab.id + ': ' + e.message);
+        }
+    }
+}
+
 async function wakeBridge() {
     const stored = await chrome.storage.local.get(['bridgeActive']);
     bridgeActive = stored.bridgeActive !== false;
@@ -131,6 +148,9 @@ async function wakeBridge() {
     scheduleKeepAliveAlarm();
     if (!pollInFlight) {
         pollServer();
+    }
+    if (lastJustLoaded) {
+        await reinjectAllBridgeTabs();
     }
     pushLiveState();
     syncServerControlState();
@@ -263,35 +283,98 @@ async function getActiveTab() {
     return tabs[0] || null;
 }
 
-async function injectContentScript(tabId) {
+async function cleanupLegacyBridgeOnTab(tabId) {
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => {
+                try {
+                    if (window.__geminiBridgeHeartbeatTimer != null) {
+                        clearInterval(window.__geminiBridgeHeartbeatTimer);
+                        window.__geminiBridgeHeartbeatTimer = null;
+                    }
+                } catch (e) {}
+                try {
+                    document
+                        .querySelectorAll('#gemini-bridge-eyes, #gemini-bridge-overlay')
+                        .forEach((el) => el.remove());
+                } catch (e) {}
+            }
+        });
+    } catch (e) {}
     try {
         await chrome.scripting.executeScript({
             target: { tabId },
             files: ['content.js']
         });
+    } catch (e) {}
+}
+
+function resolveEyeModeFromPayload(active, controlled, eyeMode) {
+    if (!active) return 'idle';
+    if (eyeMode === 'busy' || eyeMode === 'idle') return eyeMode;
+    return controlled ? 'busy' : 'idle';
+}
+
+async function applyEyesToTab(tabId, { active, isBusy, eyeMode }) {
+    if (!tabId) return;
+    const mode = resolveEyeModeFromPayload(active, isBusy, eyeMode);
+    try {
+        await cleanupLegacyBridgeOnTab(tabId);
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            files: ['eyes-page.js']
+        });
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (show, eyeModeArg) => {
+                if (show && typeof window.__bridgeApplyEyes === 'function') {
+                    window.__bridgeApplyEyes(eyeModeArg);
+                } else if (typeof window.__bridgeRemoveEyes === 'function') {
+                    window.__bridgeRemoveEyes();
+                }
+            },
+            args: [!!active, mode]
+        });
     } catch (e) {
-        await extLog('Inject failed: ' + e.message);
+        await extLog('applyEyes tab ' + tabId + ': ' + e.message);
     }
+}
+
+async function showBridgeOverlayOnTab(tabId) {
+    if (!tabId) return;
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            files: ['eyes-page.js']
+        });
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => {
+                if (typeof window.__bridgeShowOverlay === 'function') {
+                    window.__bridgeShowOverlay('idle');
+                }
+            }
+        });
+    } catch (e) {}
+}
+
+/** @deprecated use applyEyesToTab */
+async function injectContentScript(tabId) {
+    const controlled = controlActiveNow();
+    await applyEyesToTab(tabId, {
+        active: bridgeActive,
+        isBusy: controlled,
+        eyeMode: bridgeActive ? (controlled ? 'busy' : 'idle') : 'off'
+    });
 }
 
 async function broadcastEyes(active, controlled = false) {
     const tabs = await chrome.tabs.query({});
+    const eyeMode = !active ? 'off' : controlled ? 'busy' : 'idle';
     for (const tab of tabs) {
         if (!tab.id || !tab.url?.startsWith('http')) continue;
-        const payload = {
-            action: 'update_eyes',
-            active,
-            isBusy: controlled,
-            eyeMode: !active ? 'off' : controlled ? 'busy' : 'idle'
-        };
-        try {
-            await chrome.tabs.sendMessage(tab.id, payload);
-        } catch (e) {
-            await injectContentScript(tab.id);
-            try {
-                await chrome.tabs.sendMessage(tab.id, payload);
-            } catch (e2) {}
-        }
+        await applyEyesToTab(tab.id, { active, isBusy: controlled, eyeMode });
     }
 }
 
@@ -397,6 +480,66 @@ async function pollServer() {
     }
 }
 
+async function injectTelegramBotFatherModule(tabId) {
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['telegram-botfather-v5.js']
+    });
+}
+
+async function callTelegramBotFatherApi(tabId, methodName, methodArgs = [], depth = 0) {
+    if (depth > 4) return { error: 'navigate_depth_exceeded' };
+    await injectTelegramBotFatherModule(tabId);
+    const injection = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async (name, args) => {
+            const api = window.__bridgeTelegramBotFather;
+            if (!api || typeof api[name] !== 'function') {
+                return { error: 'telegram-botfather.js not loaded', method: name };
+            }
+            return api[name](...args);
+        },
+        args: [methodName, methodArgs]
+    });
+    let result = injection[0]?.result ?? { error: 'No injection result' };
+    if (!result?.navigateTo || depth >= 4) return result;
+
+    await chrome.tabs.update(tabId, { url: result.navigateTo });
+    await new Promise((r) => setTimeout(r, 10000));
+    let afterNav = await callTelegramBotFatherApi(tabId, 'probe', [], depth + 1);
+    if (
+        afterNav?.hasActiveChat ||
+        methodName === 'runStartQuest' ||
+        methodName === 'runChatEnsure' ||
+        methodName === 'runFullQuest' ||
+        methodName === 'runBotQuest'
+    ) {
+        if (
+            methodName === 'runChatEnsure' ||
+            methodName === 'runStartQuest' ||
+            methodName === 'runFullQuest' ||
+            methodName === 'runBotQuest'
+        ) {
+            return callTelegramBotFatherApi(tabId, methodName, methodArgs, depth + 1);
+        }
+        return { opened: true, method: 'navigate', probe: afterNav, navigated: result.navigateTo };
+    }
+    if (result.fallbackNavigateTo) {
+        await chrome.tabs.update(tabId, { url: result.fallbackNavigateTo });
+        await new Promise((r) => setTimeout(r, 8000));
+        afterNav = await callTelegramBotFatherApi(tabId, 'probe', [], depth + 1);
+        if (
+            methodName === 'runChatEnsure' ||
+            methodName === 'runStartQuest' ||
+            methodName === 'runFullQuest' ||
+            methodName === 'runBotQuest'
+        ) {
+            return callTelegramBotFatherApi(tabId, methodName, methodArgs, depth + 1);
+        }
+    }
+    return result;
+}
+
 async function handleCommand(cmd) {
     let result = null;
     try {
@@ -446,13 +589,43 @@ async function handleCommand(cmd) {
                         if (typeof code !== 'string') return 'ERROR: code must be string';
                         if (code.startsWith('click_text:')) {
                             const text = code.split('click_text:')[1].trim().toLowerCase();
-                            const target = Array.from(
-                                document.querySelectorAll('button, a, span, div, [role="button"]')
-                            ).find(
-                                (e) =>
-                                    e.innerText &&
-                                    e.innerText.trim().toLowerCase().includes(text)
-                            );
+                            if (text === 'start' && /botfather/i.test(location.href)) {
+                                const mid = document.querySelector('#MiddleColumn');
+                                if (mid) {
+                                    for (const e of mid.querySelectorAll(
+                                        'button, a, .Button, [role="button"]'
+                                    )) {
+                                        if (!e.offsetParent) continue;
+                                        if ((e.innerText || '').trim().toLowerCase() !== 'start') continue;
+                                        e.click();
+                                        return 'clicked_chat_start';
+                                    }
+                                }
+                            }
+                            const roots = [];
+                            const left = document.querySelector('#column-left');
+                            if (left) roots.push(left);
+                            roots.push(document.body);
+                            const matches = [];
+                            for (const root of roots) {
+                                for (const e of root.querySelectorAll(
+                                    'button, a, span, div, [role="button"]'
+                                )) {
+                                    if (!e.offsetParent) continue;
+                                    const label = (e.innerText || '').trim();
+                                    if (!label) continue;
+                                    const low = label.toLowerCase();
+                                    const exact = low === text;
+                                    const partial = low.includes(text);
+                                    if (!exact && !partial) continue;
+                                    matches.push({ e, label, exact, len: label.length });
+                                }
+                            }
+                            matches.sort((a, b) => {
+                                if (a.exact !== b.exact) return a.exact ? -1 : 1;
+                                return a.len - b.len;
+                            });
+                            const target = matches[0]?.e;
                             if (target) {
                                 target.click();
                                 return 'clicked';
@@ -468,6 +641,222 @@ async function handleCommand(cmd) {
                     args: [cmd.code]
                 });
                 result = injection[0]?.result;
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'extension_reload') {
+            result = { status: 'reloading' };
+            setTimeout(() => chrome.runtime.reload(), 150);
+        } else if (cmd.action === 'telegram_send') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                const injection = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: async (text) => {
+                        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+                        const input =
+                            document.querySelector('#editable-message-text') ||
+                            document.querySelector('.input-message-input') ||
+                            document.querySelector('[contenteditable="true"]');
+                        if (!input) return { error: 'no_input' };
+                        input.focus();
+                        try {
+                            document.execCommand('insertText', false, text);
+                        } catch (e) {
+                            input.innerText = text;
+                            input.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                        input.dispatchEvent(
+                            new KeyboardEvent('keydown', {
+                                bubbles: true,
+                                cancelable: true,
+                                key: 'Enter',
+                                code: 'Enter',
+                                keyCode: 13
+                            })
+                        );
+                        await sleep(3200);
+                        return { sent: true, text };
+                    },
+                    args: [cmd.text || '/mybots']
+                });
+                result = injection[0]?.result ?? { error: 'No send result' };
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_botfather_chat') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            const createIfMissing = cmd.createIfMissing !== false;
+            if (tab?.id) {
+                result = await callTelegramBotFatherApi(tab.id, 'runChatEnsure', [createIfMissing]);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_open_botfather') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                result = await callTelegramBotFatherApi(tab.id, 'openBotFatherChat', []);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_botfather_start') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                result = await callTelegramBotFatherApi(tab.id, 'runStartQuest', [
+                    cmd.displayName || '',
+                    cmd.username || ''
+                ]);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_botfather_bots') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                await callTelegramBotFatherApi(tab.id, 'probe', []);
+                result = await callTelegramBotFatherApi(tab.id, 'probeBotsState', []);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_botfather_bot_quest') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                result = await callTelegramBotFatherApi(tab.id, 'runBotQuest', [
+                    cmd.displayName || '',
+                    cmd.username || ''
+                ]);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_botfather_token') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                result = await callTelegramBotFatherApi(tab.id, 'runTokenQuest', []);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_botfather_full') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                result = await callTelegramBotFatherApi(tab.id, 'runFullQuest', [
+                    {
+                        displayName: cmd.displayName || '',
+                        username: cmd.username || ''
+                    }
+                ]);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_inject_version') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                await injectTelegramBotFatherModule(tab.id);
+                const injection = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: () => window.__bridgeTelegramBotFather?.VERSION || 'missing'
+                });
+                result = { version: injection[0]?.result };
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_botfather_debug') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                result = await callTelegramBotFatherApi(tab.id, 'debugSearchType', []);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_dom_scan') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                result = await callTelegramBotFatherApi(tab.id, 'domScan', []);
+            } else {
+                result = { error: 'No active tab' };
+            }
+        } else if (cmd.action === 'telegram_probe') {
+            const tab = cmd.tabId ? { id: cmd.tabId } : await getActiveTab();
+            if (tab?.id) {
+                const injection = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: () => {
+                        const isPresent = (sel) => !!document.querySelector(sel);
+                        const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+                        const isAppLoaded =
+                            isPresent('.chatlist-container') ||
+                            isPresent('#side-bar') ||
+                            isPresent('.Sidebar') ||
+                            isPresent('#LeftColumn') ||
+                            isPresent('.ChatInput') ||
+                            isPresent('.chat-list') ||
+                            isPresent('.ListItem-chat') ||
+                            isPresent('.Chat') ||
+                            isPresent('#MiddleColumn') ||
+                            isPresent('.tabs-container') ||
+                            isPresent('.folders-tabs');
+                        const qrLoginByText =
+                            /log in to telegram by qr/i.test(bodyText) ||
+                            /link desktop device/i.test(bodyText) ||
+                            /point your phone at this screen/i.test(bodyText);
+                        const onLoginPage = !isAppLoaded && qrLoginByText;
+                        const loggedIn = isAppLoaded && !onLoginPage;
+                        const titleMatch = /BotFather/i.test(bodyText);
+                        const hashBf = window.location.hash.includes('BotFather');
+                        const hasMessages =
+                            isPresent('.bubbles-inner') ||
+                            isPresent('.message-list') ||
+                            isPresent('.Message');
+                        const isBotFather = titleMatch || (hashBf && hasMessages);
+                        const tokenMatch = bodyText.match(/\d{8,10}:[a-zA-Z0-9_-]{35}/);
+                        const systemBots = new Set([
+                            'botfather',
+                            'botsupport',
+                            'botnews',
+                            'gif',
+                            'stickers',
+                            'telegram',
+                            'youtube',
+                            'pic',
+                            'like'
+                        ]);
+                        const botButtons = Array.from(
+                            document.querySelectorAll(
+                                'a, button, .reply-markup-button, .Button, .btn, [role="button"]'
+                            )
+                        )
+                            .filter((el) => {
+                                const t = (el.innerText || '').trim();
+                                if (!t || t.length > 64 || /\n/.test(t)) return false;
+                                const m = t.match(/^@([a-zA-Z0-9_]+)$/i);
+                                if (!m) return false;
+                                const h = m[1].toLowerCase();
+                                if (systemBots.has(h)) return false;
+                                return /bot$/i.test(h);
+                            })
+                            .map((el) => (el.innerText || '').trim());
+                        const hasBotList =
+                            /choose a bot from the list/i.test(bodyText) ||
+                            /edit bots/i.test(bodyText) ||
+                            botButtons.length > 0;
+                        const hasTokenMenu =
+                            /api token/i.test(bodyText) ||
+                            /token for/i.test(bodyText) ||
+                            /revoke current token/i.test(bodyText);
+                        return {
+                            url: window.location.href,
+                            loggedIn,
+                            isLoginPage: onLoginPage,
+                            isBotFather,
+                            foundToken: tokenMatch ? tokenMatch[0] : null,
+                            botButtons: botButtons.slice(-5),
+                            hasBotList,
+                            hasTokenMenu,
+                            hasNoBots:
+                                /you have no bots|no bots yet/i.test(bodyText) ||
+                                botButtons.length === 0,
+                            textSample: bodyText.slice(0, 500)
+                        };
+                    }
+                });
+                result = injection[0]?.result ?? { error: 'No probe result' };
             } else {
                 result = { error: 'No active tab' };
             }
@@ -524,18 +913,14 @@ if (chrome.tabs?.onDiscarded) {
 if (chrome.webNavigation?.onCompleted) {
     chrome.webNavigation.onCompleted.addListener((details) => {
         if (!bridgeActive || details.frameId !== 0) return;
-        injectContentScript(details.tabId).then(() => {
-            const controlled = controlActiveNow();
-            chrome.tabs
-                .sendMessage(details.tabId, {
-                    action: 'update_eyes',
-                    active: true,
-                    isBusy: controlled,
-                    eyeMode: controlled ? 'busy' : 'idle'
-                })
-                .catch(() => {});
+        const controlled = controlActiveNow();
+        applyEyesToTab(details.tabId, {
+            active: true,
+            isBusy: controlled,
+            eyeMode: controlled ? 'busy' : 'idle'
+        }).then(() => {
             if (lastJustLoaded) {
-                chrome.tabs.sendMessage(details.tabId, { action: 'show_overlay' }).catch(() => {});
+                showBridgeOverlayOnTab(details.tabId);
                 lastJustLoaded = false;
             }
         });

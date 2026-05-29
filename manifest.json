@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Google Chrome Bridge",
-    "version": "1.5.1",
+    "version": "1.5.14",
     "description": "Local HTTP bridge: exposes live Chrome tabs to AI via localhost:5000.",
     "permissions": [
         "storage",
@@ -25,18 +25,6 @@
     "background": {
         "service_worker": "background.js"
     },
-    "content_scripts": [
-        {
-            "matches": [
-                "<all_urls>"
-            ],
-            "js": [
-                "content.js"
-            ],
-            "run_at": "document_end",
-            "all_frames": true
-        }
-    ],
     "icons": {
         "16": "icons/icon_16.png",
         "48": "icons/icon_48.png",
