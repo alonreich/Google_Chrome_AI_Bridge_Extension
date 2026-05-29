@@ -1,0 +1,10 @@
+{
+  "name": "google-chrome-bridge-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local HTTP bridge for Google Chrome Bridge extension",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

@@ -1,0 +1,310 @@
+================================================================================
+GOOGLE CHROME BRIDGE — PROJECT STRUCTURE & OPERATIONS MANUAL
+================================================================================
+Path:    C:\Full_Control\Google_Chrome_AI_Bridge_Extension\
+Version: Extension manifest 1.5.1 | Bridge server (Node, no npm deps)
+Updated: 2026-05-29
+
+This document is the single source of truth for any AI agent or human working
+on this project. Read it fully before changing code or attempting automation.
+
+================================================================================
+§1  GOAL — WHY THIS PROJECT EXISTS
+================================================================================
+
+PROBLEM
+  Cursor’s built-in browser and other isolated automation environments cannot
+  reliably control the user’s real Google Chrome profile (logged-in sessions,
+  extensions, cookies, corporate SSO, Telegram Web, ServiceNow, etc.).
+
+SOLUTION
+  Google Chrome Bridge is a Manifest V3 Chrome extension plus a localhost HTTP
+  server that together expose the user’s REAL Chrome to automation on the same
+  machine.
+
+WHAT SUCCESS LOOKS LIKE
+  • With bridge ON, an AI agent on the PC can:
+      - Read live page text/URLs from open http(s) tabs (GET /live).
+      - Queue browser actions (navigate, click, read tab, list tabs, etc.).
+      - Receive command results (GET /result/:id).
+  • The human uses their normal Chrome; the agent does not need Cursor Browser.
+  • All traffic stays on 127.0.0.1 — nothing is sent to the cloud by default.
+
+RELATION TO OTHER PROJECTS
+  • Service-Now_PD (sibling extension) is a separate product for PD alerting.
+  • This bridge is generic: any site the user can open in Chrome is in scope.
+  • Typical use: Telegram/BotFather setup, ServiceNow UI, internal web apps.
+
+================================================================================
+§2  RESPONSIBILITY SPLIT — AI AGENT vs HUMAN
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ AI AGENT (Cursor / automation on the PC) — MUST DO                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 1. Start and keep the bridge server running:                                │
+│      C:\Full_Control\Google_Chrome_AI_Bridge_Extension\bridge-server\          │
+│      start-server.bat                                                       │
+│    OR: cd bridge-server && node server.js                                   │
+│    The HUMAN does NOT start the server — the agent does.                    │
+│                                                                             │
+│ 2. Before every automation session, verify server health:                   │
+│      curl.exe -s http://127.0.0.1:5000/health                               │
+│    Expect JSON with "ok": true.                                             │
+│                                                                             │
+│ 3. Use only the HTTP API on 127.0.0.1:5000 (see §6).                        │
+│    On Windows PowerShell, prefer Invoke-RestMethod or curl.exe for JSON.    │
+│                                                                             │
+│ 4. After code changes to bridge-server/server.js, restart the server.       │
+│                                                                             │
+│ 5. If /live is stale or commands are not executed, diagnose:                │
+│      - Is health OK?                                                        │
+│      - Is extension bridge toggle ON? (human confirms)                      │
+│      - Reload extension at chrome://extensions if service worker errors.    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ HUMAN — MUST DO (agent cannot do these)                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 1. Install Node.js on Windows (for bridge-server).                          │
+│                                                                             │
+│ 2. Load the extension once (Developer mode):                                │
+│      chrome://extensions → Developer mode → Load unpacked →                 │
+│      C:\Full_Control\Google_Chrome_AI_Bridge_Extension                         │
+│                                                                             │
+│ 3. Turn Bridge ON in the extension toolbar popup (toggle).                  │
+│    Leave it ON for the whole session the agent needs access.                │
+│                                                                             │
+│ 4. Use normal Chrome windows/tabs on http(s) pages (not chrome:// pages).   │
+│                                                                             │
+│ 5. After extension updates: Reload extension on chrome://extensions,        │
+│    click "Clear all" on errors if status 15 appeared, refresh open tabs.    │
+│                                                                             │
+│ 6. Do NOT close the terminal/window only if the human chose to run the      │
+│    server manually; normally the AGENT runs start-server.bat in background. │
+│                                                                             │
+│ 7. Grant trust: bridge can read page text and control tabs while ON.        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+§3  ARCHITECTURE (THREE PARTS)
+================================================================================
+
+  ┌──────────────────┐         HTTP (localhost)        ┌─────────────────────┐
+  │  AI agent /      │  POST /queue, GET /live, etc.   │  bridge-server/     │
+  │  Cursor shell    │◄───────────────────────────────►│  server.js :5000    │
+  └──────────────────┘                                 └──────────┬──────────┘
+                                                                    │
+                         GET /command?wait=25000 (long-poll)        │
+                         POST /state, POST /result, POST /log       │
+                                                                    ▼
+                                                       ┌─────────────────────┐
+                                                       │  Chrome extension   │
+                                                       │  background.js (SW) │
+                                                       │  + offscreen.js     │
+                                                       └──────────┬──────────┘
+                                                                    │
+                         chrome.scripting / tabs / storage          │
+                                                                    ▼
+                                                       ┌─────────────────────┐
+                                                       │  content.js on tabs │
+                                                       │  (eye overlay UI)   │
+                                                       │  User's real Chrome │
+                                                       └─────────────────────┘
+
+DATA FLOW — READ (live state)
+  1. background.js every ~4s (offscreen tick) + on tab events pushes tab
+     snapshots to POST /state.
+  2. Agent reads GET /live → { tabs[], activeTab, updatedAt, bridgeActive }.
+
+DATA FLOW — WRITE (command)
+  1. Agent POST /queue { action, id?, ...payload }.
+  2. Server enqueues command; may wake long-poll waiters immediately.
+  3. Extension long-poll GET /command?wait=25000 receives command.
+  4. background.js executes action (navigate, get_data, execute, …).
+  5. Extension POST /result { id, result }.
+  6. Agent GET /result/:id reads outcome.
+
+IMPORTANT: Do NOT call GET /command from the agent — only the extension polls it.
+
+================================================================================
+§4  FILE MAP
+================================================================================
+
+C:\Full_Control\Google_Chrome_AI_Bridge_Extension\
+│
+├── manifest.json          MV3 manifest (v1.5.1). NO "offscreen" permission
+│                          (invalid permission breaks service worker).
+├── background.js          Service worker: poll, commands, live state, icons
+├── content.js             Injected on all http(s) pages: eye overlay + heartbeat
+├── popup.html / popup.js  Toolbar popup: bridge toggle, server status
+├── offscreen.html/js      Hidden document: 4s keepalive ticks → background
+├── icons/                 Toolbar icons (grey / blue / red states)
+│   └── generate-icons.ps1 Regenerate PNGs after art changes
+├── README.md              Short human-oriented quick start
+├── project_structure.txt  This file
+│
+└── bridge-server/
+    ├── server.js          Node HTTP API (port 5000)
+    ├── start-server.bat   Agent should run this (not the human)
+    └── package.json       npm script: node server.js
+
+================================================================================
+§5  EXTENSION BEHAVIOR (MECHANICS)
+================================================================================
+
+BRIDGE TOGGLE (chrome.storage.local bridgeActive, default true on install)
+  OFF → polling stopped, offscreen closed, grey icon, no page overlay.
+  ON  → long-poll loop, offscreen keepalive, blue/red icons, overlay shown.
+
+KEEPALIVE (why idle pages used to “die” — fixed in v1.5+)
+  • Long-poll holds service worker awake up to 25s per request.
+  • offscreen.js setInterval 4s → bridge_tick → pushLiveState + poll if idle.
+  • chrome.alarms every 20s backup wake (if alarms API available).
+  • content.js heartbeat every 20s on each top-level page.
+
+VISUAL STATES (toolbar + bottom-right elliptical eye on page)
+  Grey  — bridge OFF
+  Blue  — bridge ON, no command in flight
+  Red   — command queued or executing (server controlling: true)
+
+SERVICE WORKER REGISTRATION
+  Status code 15 = script error on load. Common fix: remove invalid manifest
+  permissions; guard chrome.alarms / chrome.tabs.onDiscarded listeners.
+  After fix: chrome://extensions → Clear all errors → Reload.
+
+================================================================================
+§6  HTTP API REFERENCE (AGENT)
+================================================================================
+
+Base URL: http://127.0.0.1:5000
+
+── Health & discovery ──────────────────────────────────────────────────────
+GET  /health
+     → { ok, queueLength, controlling, inFlightId, liveUpdatedAt, waiters }
+
+GET  /
+     → API index JSON
+
+── Live read (no queue; use often) ─────────────────────────────────────────
+GET  /live
+     → { updatedAt, activeTab, tabs[{ id, url, title, text, discarded? }],
+         bridgeActive, extensionAlive }
+
+── Command queue (agent writes) ──────────────────────────────────────────────
+POST /queue
+     Body: { "action": "<name>", "id": "<optional unique string>", ... }
+     → { queued: true, id }
+
+GET  /result/:id
+     → { result, at }  or 404 if not ready yet
+
+── Extension-only (do not call from agent) ─────────────────────────────────
+GET  /command?wait=25000     Long-poll; extension only
+POST /result                 Extension posts after handling command
+POST /state                  Extension pushes tab snapshots
+POST /log                    Extension debug lines
+
+GET  /logs?limit=100         Recent extension log messages
+
+================================================================================
+§7  COMMAND ACTIONS (POST /queue)
+================================================================================
+
+All commands should include a unique "id" when the agent needs the result.
+
+navigate
+  { "action": "navigate", "url": "https://example.com", "id": "nav1" }
+  Updates active tab URL or creates a new tab.
+
+get_data
+  { "action": "get_data", "id": "read1", "tabId": 123 optional }
+  Returns [{ url, title, text }] for active tab (or tabId). Text capped ~50k.
+  Discarded tabs are reloaded automatically before read.
+
+execute
+  { "action": "execute", "code": "...", "id": "ex1", "tabId": optional }
+  Runs JS in page context. Special prefix:
+    click_text:Submit   → clicks first button/link containing that text (case-insensitive)
+
+list_tabs
+  { "action": "list_tabs", "id": "tabs1" }
+  → [{ id, url, title, active, windowId, discarded }]
+
+activate_tab
+  { "action": "activate_tab", "tabId": 1747303764, "id": "act1" }
+
+get_storage
+  { "action": "get_storage", "area": "local", "keys": null or ["key"], "id": "gs1" }
+
+set_storage
+  { "action": "set_storage", "area": "local", "data": { "key": "value" }, "id": "ss1" }
+
+================================================================================
+§8  AGENT PLAYBOOK — STEP BY STEP
+================================================================================
+
+SESSION START (agent checklist)
+  [ ] 1. Start server:
+          C:\Full_Control\Google_Chrome_AI_Bridge_Extension\bridge-server\start-server.bat
+        (background shell; keep running for whole session)
+  [ ] 2. curl.exe -s http://127.0.0.1:5000/health  → ok:true
+  [ ] 3. Ask human to confirm: extension loaded, bridge toggle ON, on https:// tab
+  [ ] 4. curl.exe -s http://127.0.0.1:5000/live  → updatedAt recent, bridgeActive true
+
+WINDOWS — QUEUE A COMMAND (PowerShell examples)
+  $body = @{ action = 'navigate'; url = 'https://example.com'; id = 'nav1' } | ConvertTo-Json
+  Invoke-RestMethod -Uri 'http://127.0.0.1:5000/queue' -Method Post -ContentType 'application/json' -Body $body
+
+  Start-Sleep -Seconds 2
+  curl.exe -s http://127.0.0.1:5000/result/nav1
+
+READ LIVE WITHOUT QUEUE
+  curl.exe -s http://127.0.0.1:5000/live
+
+POLL RESULT AFTER SLOW COMMANDS
+  Retry GET /result/:id every 1–2s until 200 or timeout ~30s.
+
+WHEN STUCK
+  • health fails → restart start-server.bat (agent).
+  • live stale / bridgeActive false → human must turn bridge ON.
+  • badge ? on extension → server unreachable.
+  • controlling true forever → wait 90s (server clears stale inFlight) or restart server.
+  • Service worker inactive → human reloads extension, Clear all errors.
+
+================================================================================
+§9  SERVER INTERNALS (for maintainers)
+================================================================================
+
+Port: 5000 (env BRIDGE_PORT, BRIDGE_HOST=127.0.0.1)
+Queues: commandQueue[], inFlight (one command with extension until /result)
+Long-poll: commandWaiters[] woken when POST /queue adds work
+Stale guard: inFlight cleared after 90s (IN_FLIGHT_TIMEOUT_MS), command re-queued
+CORS: * on all responses (localhost only)
+
+================================================================================
+§10  HUMAN QUICK CHECKLIST (printable)
+================================================================================
+
+  □ Node.js installed
+  □ Extension loaded from C:\Full_Control\Google_Chrome_AI_Bridge_Extension
+  □ Bridge toggle ON in popup (“Server OK” if agent started server)
+  □ Working on regular website (https://), not chrome://extensions
+  □ After updates: Reload extension + refresh tabs
+  □ Agent runs start-server.bat — you do not need to, unless agent is offline
+
+================================================================================
+§11  WHAT THE NEXT AI AGENT SHOULD DO FIRST
+================================================================================
+
+1. Read this entire file.
+2. Start bridge-server via start-server.bat (if not already running).
+3. GET /health and GET /live to confirm connectivity.
+4. Confirm with human: bridge ON, target site open in Chrome.
+5. Proceed with queued commands + /live for observation.
+6. Do not use Cursor’s isolated browser for tasks that require the user’s real
+   Chrome session — use this bridge instead.
+
+================================================================================
+END OF DOCUMENT
+================================================================================

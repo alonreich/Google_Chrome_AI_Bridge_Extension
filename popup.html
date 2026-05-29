@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {
+            width: 300px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            padding: 20px;
+            background-color: #ffffff;
+            color: #202124;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+        h2 { margin: 0; font-size: 18px; }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 26px;
+        }
+        .switch input { 
+            opacity: 0; width: 0; height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 26px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #4285F4;
+        }
+        input:checked + .slider:before {
+            transform: translateX(24px);
+        }
+        .debug-panel {
+            background-color: #f1f3f4;
+            border-radius: 8px;
+            padding: 12px;
+            text-align: left;
+            font-size: 12px;
+            margin-top: 15px;
+            border: 1px solid #dadce0;
+        }
+        .debug-item {
+            margin-bottom: 8px;
+        }
+        .debug-label {
+            font-weight: bold;
+            color: #5f6368;
+            display: block;
+            margin-bottom: 2px;
+        }
+        .debug-value {
+            word-break: break-all;
+            color: #202124;
+            display: block;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: bold;
+            font-size: 10px;
+            text-transform: uppercase;
+        }
+        .status-active {
+            background-color: #e6f4ea;
+            color: #137333;
+        }
+        .status-inactive {
+            background-color: #fce8e6;
+            color: #c5221f;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>Bridge Control</h2>
+        <label class="switch">
+            <input type="checkbox" id="toggleBridge">
+            <span class="slider"></span>
+        </label>
+    </div>
+    
+    <div id="statusText" style="font-weight: bold; margin-bottom: 15px;">Bridge is OFF</div>
+
+    <div class="debug-panel">
+        <div class="debug-item">
+            <span class="debug-label">Current URL:</span>
+            <span id="urlDisplay" class="debug-value">Detecting...</span>
+        </div>
+        <div class="debug-item">
+            <span class="debug-label">Bridge Access:</span>
+            <span id="accessBadge" class="status-badge status-inactive">No Access</span>
+        </div>
+        <div class="debug-item">
+            <span class="debug-label">Local server (port 5000):</span>
+            <span id="serverBadge" class="status-badge status-inactive">Server OFF</span>
+        </div>
+    </div>
+    <p style="font-size:11px;color:#5f6368;margin:12px 0 0;line-height:1.4;">
+        Start the bridge server first: <code>node bridge-server/server.js</code>
+    </p>
+
+    <script src="popup.js"></script>
+</body>
+</html>
